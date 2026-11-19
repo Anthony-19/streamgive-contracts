@@ -359,6 +359,15 @@ pub enum Error {
     BatchLimitExceeded = 24,
     /// `withdraw_batch` was called with duplicate stream IDs.
     DuplicateStreamId = 25,
+    /// `create_stream` was given the vault's own address as the NGO. Nobody
+    /// can authorise as the vault, so the stream could never be withdrawn.
+    InvalidNgo = 26,
+    /// `create_stream` was given the vault's own address as the token. The
+    /// vault is not a token contract, so the deposit could never move.
+    InvalidToken = 27,
+    // Error numbers are append-only: never renumber, reuse, or remove a
+    // variant. New errors take the next unused number. See
+    // docs/UPGRADE_POLICY.md.
 }
 
 /// Maximum number of streams that can be requested in a single `get_streams` call.
@@ -494,6 +503,18 @@ fn record_payout(stream: &mut Stream, amount: i128) -> Result<(), Error> {
         .checked_add(amount)
         .ok_or(Error::ArithmeticOverflow)?;
     Ok(())
+}
+
+/// Derives the fee taken from a payout as `accrued - net`, where `net` is
+/// what `pay_ngo` (or a batch's per-stream split) actually sent to the
+/// NGO.
+///
+/// `net` never exceeds `accrued`, so the subtraction cannot fail while that
+/// invariant holds. If it is ever broken this returns
+/// `Error::ArithmeticOverflow` rather than reporting a fee of zero, so the
+/// transaction aborts instead of publishing a misleading `withdraw` event.
+fn fee_from_payout(accrued: i128, net: i128) -> Result<i128, Error> {
+    accrued.checked_sub(net).ok_or(Error::ArithmeticOverflow)
 }
 
 /// Computes `amount * fee_bps / 10_000` without an intermediate overflow.
@@ -1785,7 +1806,9 @@ impl DonationVault {
 
     /// Opens a new stream: pulls `deposit` of `token` from the donor into the
     /// vault, to be released to the NGO at `rate` per second on withdrawal.
-    /// `donor` and `ngo` must be distinct addresses.
+    /// `donor` and `ngo` must be distinct addresses, and neither `ngo` nor
+    /// `token` may be the vault's own address (`Error::InvalidNgo` /
+    /// `Error::InvalidToken`).
     ///
     /// # Examples
     ///
@@ -1829,6 +1852,18 @@ impl DonationVault {
         // how the other arguments look, and it must not reach the transfer.
         if donor == ngo {
             return Err(Error::SelfStream);
+        }
+
+        // The vault itself can be neither party nor asset: nobody can
+        // authorise as the vault to withdraw, and the vault is not a token
+        // contract. Checked before any state is written or funds move,
+        // whether or not a registry is configured.
+        let vault = env.current_contract_address();
+        if ngo == vault {
+            return Err(Error::InvalidNgo);
+        }
+        if token == vault {
+            return Err(Error::InvalidToken);
         }
 
         if deposit <= 0 || rate <= 0 {
@@ -1998,7 +2033,7 @@ impl DonationVault {
 
         let token_client = token::Client::new(&env, &stream.token);
         let net = pay_ngo(&env, &token_client, &stream.ngo, accrued);
-        let fee = accrued.checked_sub(net).unwrap_or(0);
+        let fee = fee_from_payout(accrued, net)?;
 
         WithdrawnEvent {
             stream_id,
@@ -2120,7 +2155,7 @@ impl DonationVault {
             } else {
                 0
             };
-            let net = accrued.checked_sub(fee).unwrap_or(0);
+            let net = accrued.checked_sub(fee).ok_or(Error::ArithmeticOverflow)?;
             net_amounts.push_back(net);
 
             if accrued <= 0 {
@@ -2196,7 +2231,7 @@ impl DonationVault {
             let net = net_amounts.get(idx).unwrap_or(0);
 
             if accrued > 0 {
-                let fee = accrued.checked_sub(net).unwrap_or(0);
+                let fee = fee_from_payout(accrued, net)?;
                 WithdrawnEvent {
                     stream_id,
                     accrued,
@@ -2509,6 +2544,12 @@ impl DonationVault {
     /// with `Error::StreamCancelled` if `cancel_stream` has already closed
     /// the stream out — otherwise this would quietly revive it.
     ///
+    /// If an NGO registry is configured, a rate *increase* re-verifies the
+    /// stream's NGO, the same check `top_up` and `transfer_stream` apply,
+    /// and fails with `Error::NgoNotVerified` before settling if the NGO's
+    /// verification was revoked. A rate *decrease* is always allowed, so a
+    /// donor can slow the flow to a revoked NGO without cancelling.
+    ///
     /// # Examples
     ///
     /// ```rust,no_run
@@ -2555,6 +2596,14 @@ impl DonationVault {
 
         if new_rate == stream.rate {
             return Ok(());
+        }
+
+        // A rate increase sends more to the NGO, so — like `top_up` and
+        // `transfer_stream` — it requires the NGO to still be verified when
+        // a registry is configured. A decrease only reduces what flows to
+        // the NGO, so it stays available even after a revocation.
+        if new_rate > stream.rate {
+            require_verified_ngo(&env, &stream.ngo)?;
         }
 
         let now = env.ledger().timestamp();

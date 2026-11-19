@@ -63,6 +63,10 @@ This project does not yet follow a formal versioning scheme — each contract's
   invariants, and per-contract threat tables (authorization and accounting,
   availability and storage economics, registry identity, privilege/deployment
   and off-chain), plus a residual-risk register of open items.
+- `docs/UPGRADE_POLICY.md`: error codes are append-only, how storage-layout
+  changes are handled across an `upgrade`, and the process for announcing
+  breaking changes (#314).
+- `donation-vault`: `Error::InvalidNgo` (26) and `Error::InvalidToken` (27).
 
 ### Changed
 
@@ -91,6 +95,16 @@ This project does not yet follow a formal versioning scheme — each contract's
 
 ### Fixed
 
+- `donation-vault`: `modify_rate` re-verifies the NGO with the configured
+  registry when the rate is raised, matching `top_up` and `transfer_stream`,
+  and fails with `Error::NgoNotVerified` for a revoked NGO. Lowering the rate
+  is still allowed (#330).
+- `donation-vault`: `create_stream` rejects the vault's own address as the
+  NGO (`Error::InvalidNgo`) or the token (`Error::InvalidToken`) before any
+  state is written (#331).
+- `donation-vault`: `withdraw` and `withdraw_batch` return
+  `Error::ArithmeticOverflow` if the fee/net split cannot be computed,
+  instead of reporting a fee of zero (#332).
 - `donation-vault`: `set_treasury` rejects the vault's own address with
   `Error::InvalidTreasury`, so protocol fees can't be locked in the
   contract.

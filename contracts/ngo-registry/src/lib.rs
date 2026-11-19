@@ -128,6 +128,9 @@ pub enum Error {
     /// The supplied name is empty, contains only Unicode whitespace or invisible
     /// format characters, contains control characters, or is invalid UTF-8.
     InvalidName = 11,
+    // Error numbers are append-only: never renumber, reuse, or remove a
+    // variant. New errors take the next unused number. See
+    // docs/UPGRADE_POLICY.md.
 }
 
 /// Upper bound on `Ngo.name`, in bytes. Persistent storage cost scales with
