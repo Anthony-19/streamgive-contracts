@@ -40,17 +40,30 @@ flowchart LR
 
 ### `ngo-registry` (Soroban contract)
 
-Owns the canonical list of NGOs. Registers an NGO's address, display
-name, jurisdiction, and payout destination. `donation-vault` trusts
-`ngo-registry` for identity: a stream can only be opened toward an NGO
-that the registry recognises. Admin-gated writes; public reads.
+Owns the canonical list of NGOs. Each `Ngo` record stores only three fields:
+the NGO's `owner` address, display `name`, and `verified` flag. When a
+registry is configured on `donation-vault` via `set_registry`, the vault
+verifies NGOs against `ngo-registry` on `create_stream`, `top_up`, and
+`transfer_stream` (failing closed if the lookup fails or the NGO is not
+verified); until `set_registry` is called — or after `clear_registry` — no
+registry check is performed. Applications (`register`, `update_name`,
+`unregister`) are owner-gated, verification and moderation (`approve_ngo`,
+`batch_approve`, `revoke_ngo`, `remove_ngo`) are admin-gated, and reads and
+`touch_ngo` are public.
 
 ### `donation-vault` (Soroban contract)
 
 Holds donor funds and streams them to an NGO at a fixed rate per second.
 Owns the `Stream` struct and the full lifecycle: `create_stream`,
-`withdraw`, `top_up`, `modify_rate`, `cancel_stream`. Emits one event
-per state-changing call; see `docs/EVENTS.md` for the topic/data schema.
+`withdraw`, `withdraw_batch`, `top_up`, `modify_rate`, `transfer_stream`,
+`cancel_stream`, and `rescue_stream`. Emits typed Soroban events for stream
+lifecycle transitions and admin configuration changes, though not every
+state-changing call emits exactly one event: TTL-only bumps (`extend_stream`)
+and no-op calls (such as `modify_rate` with the same rate, `transfer_stream`
+to the same NGO, `clear_token_fee_bps` with no override, or `cancel_stream`
+when nothing moved) emit no event, while `withdraw_batch` emits one
+`withdraw` event per contributing stream. See `docs/EVENTS.md` for the
+topic/data schema.
 
 #### Token transfers and reentrancy
 
@@ -113,7 +126,7 @@ wallet extension.
 
 | Data | Lives in | Notes |
 |---|---|---|
-| NGO registry (addresses, names) | `ngo-registry` contract | Public, admin-written |
+| NGO registry (owners, names, verified flag) | `ngo-registry` contract | Public reads; owner- and admin-gated writes |
 | Stream state (balance, rate, status) | `donation-vault` contract | One `Stream` per id |
 | Historical events | Horizon | Indexed by `streamgive-backend` |
 | Queryable projections | `streamgive-backend`'s store | Postgres or SQLite |
