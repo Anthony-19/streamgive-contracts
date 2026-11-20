@@ -5,6 +5,9 @@ platform for verified NGOs on Stellar.
 
 For how these contracts fit with the backend and frontend — and how a
 donation flows end to end — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+For the stream lifecycle diagrams, see
+[docs/STREAM_LIFECYCLE.md](docs/STREAM_LIFECYCLE.md); for simulating entry
+points and estimating resource costs, see [docs/GAS.md](docs/GAS.md).
 For who these contracts defend against, what the admin can and cannot do, and
 which risks are knowingly accepted, see
 [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
@@ -181,6 +184,78 @@ build, a wasm binary size check (see
 [`scripts/check-wasm-size.sh`](scripts/check-wasm-size.sh)), and
 `cargo test --workspace` on every push and pull request.
 
+## Deploying
+
+[`scripts/deploy-testnet.sh`](scripts/deploy-testnet.sh) builds both
+contracts, deploys `ngo-registry` and `donation-vault` to Stellar
+testnet (initializing each atomically via `__constructor`), applies any
+optional vault configuration, verifies `admin()`, and writes the resulting
+contract IDs and Wasm SHA-256 hashes to [`deployments.json`](deployments.json).
+
+### Prerequisites
+
+- The [`stellar` CLI](https://developers.stellar.org/docs/tools/cli).
+- `rustup` with the `wasm32v1-none` target:
+  `rustup target add wasm32v1-none`.
+- Node.js (`node`), used to check for existing entries, compute Wasm SHA-256
+  hashes, and atomically update `deployments.json` while preserving any
+  existing `mainnet` entry.
+- A funded testnet identity, for example:
+  `stellar keys generate my-testnet-identity --network testnet --fund`.
+
+Both deploy scripts check for `stellar`, `node`, `rustup`, and the
+`wasm32v1-none` target up front and exit before deploying anything if one is
+missing.
+
+### Environment variables
+
+- `STELLAR_SOURCE_ACCOUNT` (required): the name of the funded Stellar CLI
+  identity that signs and pays for the deploy.
+- `STELLAR_ADMIN_ADDRESS` (optional on testnet; required `G...` address on
+  mainnet): the address set as admin of both contracts. Use a wallet a human
+  can sign with, because admin actions such as approving NGOs are driven from
+  the browser admin panel, which a CLI-only deployer key cannot do. On testnet
+  this falls back to the address of `STELLAR_SOURCE_ACCOUNT`, which is fine
+  for a throwaway deploy only.
+- `STELLAR_REGISTRY_ADDRESS` (optional on testnet; required on mainnet unless
+  `--allow-no-registry` is passed): address of `ngo-registry` (`C...` or
+  `G...`), or `"auto"` to wire the vault to the newly deployed registry via
+  `set_registry`.
+- `STELLAR_TREASURY_ADDRESS` (optional): treasury address (`C...` or `G...`)
+  passed to `set_treasury`. Required if `STELLAR_FEE_BPS > 0`.
+- `STELLAR_FEE_BPS` (optional): global protocol fee in basis points
+  (`0`–`1000`), passed to `set_fee_bps`.
+- `STELLAR_MIN_DEPOSIT` (optional): minimum stream deposit in stroops
+  (non-negative integer), passed to `set_min_deposit`.
+
+### Running the script
+
+From the repo root:
+
+```sh
+STELLAR_SOURCE_ACCOUNT=my-testnet-identity \
+STELLAR_ADMIN_ADDRESS=G... \
+STELLAR_REGISTRY_ADDRESS=auto \
+./scripts/deploy-testnet.sh
+```
+
+`deploy-testnet.sh` refuses to overwrite an existing testnet entry in
+`deployments.json`; pass `--force` to overwrite it deliberately.
+
+### `deployments.json`
+
+`deployments.json` holds the live testnet deployment at the top level: the
+network, network passphrase, deployment timestamp, admin address, contract
+IDs, and Wasm SHA-256 hashes. The backend and frontend read these IDs from
+their env files, so update them there after a redeploy. Avoid committing a
+`deployments.json` rewritten by a personal test deploy.
+
+A mainnet deployment is recorded under the `mainnet` key of the same file by
+[`scripts/deploy-mainnet.sh`](scripts/deploy-mainnet.sh), which requires
+`--confirm`, `STELLAR_SOURCE_ACCOUNT`, `STELLAR_ADMIN_ADDRESS`,
+`STELLAR_RPC_URL`, and `STELLAR_REGISTRY_ADDRESS` (unless
+`--allow-no-registry` is passed).
+
 ## FAQ
 
 ### Why is this project licensed under Apache-2.0?
@@ -225,7 +300,8 @@ the numeric code below (e.g. a failed `try_withdraw` surfacing `Error(5)`).
 
 ### `donation-vault`
 
-Codes 1–23 are the full `Error` enum. "Admin-gated" entry points first call
+Codes 1–27 are the full `Error` enum. Codes are append-only and never
+renumbered; see [docs/UPGRADE_POLICY.md](docs/UPGRADE_POLICY.md). "Admin-gated" entry points first call
 `require_admin`, so they can also return `NotInitialized` (no admin) or
 `AdminRenounced`.
 
@@ -248,16 +324,20 @@ Codes 1–23 are the full `Error` enum. "Admin-gated" entry points first call
 | 15 | `StreamCancelled` | The stream was already closed out by `cancel_stream`/`rescue_stream`. | `top_up`, `modify_rate`, `transfer_stream`, `rescue_stream` |
 | 16 | `InvalidAdmin` | The proposed admin equals the current admin. | `propose_admin` |
 | 17 | `StreamLimitExceeded` | Donor reached `max_streams_per_donor`. | `create_stream` |
-| 18 | `NgoNotVerified` | A configured registry has no verified entry for the NGO. | `create_stream` |
+| 18 | `NgoNotVerified` | A configured registry has no verified entry for the NGO. | `create_stream`, `top_up`, `transfer_stream`, `modify_rate` (rate increases only) |
 | 19 | `StreamCounterMissing` | The stream-id counter is absent from instance storage. | `create_stream` |
 | 20 | `AdminRenounced` | Admin control was permanently renounced, or `init` ran after a renounce. | `init`, `admin`, `propose_admin`, `cancel_admin_proposal`, `pause`, `unpause`, `set_treasury`, `clear_treasury`, `set_fee_bps`, `set_token_fee_bps`, `clear_token_fee_bps`, `set_min_deposit`, `set_cancel_grace_ledgers`, `set_max_streams_per_donor`, `set_registry`, `renounce_admin`, `rescue_stream`, `upgrade` |
 | 21 | `FeeRequiresTreasury` | A non-zero fee was set with no treasury, or the treasury was cleared while a fee is set. | `set_fee_bps`, `set_token_fee_bps`, `clear_treasury` |
 | 22 | `NotPaused` | `rescue_stream` called while the vault is active. | `rescue_stream` |
 | 23 | `MixedNgo` | A batch withdrawal mixed streams belonging to different NGOs. | `withdraw_batch` |
+| 24 | `BatchLimitExceeded` | Too many ids in one batch call. | `get_streams`, `withdraw_batch` |
+| 25 | `DuplicateStreamId` | The same stream id appears twice in a batch withdrawal. | `withdraw_batch` |
+| 26 | `InvalidNgo` | The NGO is the vault's own address. | `create_stream` |
+| 27 | `InvalidToken` | The token is the vault's own address. | `create_stream` |
 
 ### `ngo-registry`
 
-Codes 1–11 are the full `Error` enum. Admin-gated entry points first call
+Codes 1–11 are the full `Error` enum. The same append-only rule applies. Admin-gated entry points first call
 `require_admin`, so they can also return `NotInitialized`.
 
 | Code | Error | Meaning | Entry points |

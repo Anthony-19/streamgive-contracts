@@ -4098,6 +4098,164 @@ fn bad_registry_fails_top_up_with_ngo_not_verified() {
 }
 
 // =============================================================================
+// modify_rate NGO verification (issue #330)
+// =============================================================================
+
+#[test]
+fn modify_rate_increase_for_revoked_ngo_fails_and_preserves_state() {
+    let (s, registry) = setup_with_registry();
+    s.token_admin.mint(&s.donor, &1_000);
+
+    registry.register(&s.ngo, &soroban_sdk::String::from_str(&s.env, "Red Cross"));
+    registry.approve_ngo(&s.ngo);
+
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+
+    registry.revoke_ngo(&s.ngo);
+    s.env.ledger().with_mut(|l| l.timestamp += 10);
+
+    let before = s.client.get_stream(&stream_id);
+    let ngo_balance_before = s.token.balance(&s.ngo);
+
+    let result = s.client.try_modify_rate(&stream_id, &20);
+    assert_eq!(result, Err(Ok(Error::NgoNotVerified)));
+
+    // Rejected before settling: nothing paid out, stream untouched.
+    assert_eq!(s.client.get_stream(&stream_id), before);
+    assert_eq!(s.token.balance(&s.ngo), ngo_balance_before);
+}
+
+#[test]
+fn modify_rate_decrease_for_revoked_ngo_succeeds() {
+    let (s, registry) = setup_with_registry();
+    s.token_admin.mint(&s.donor, &1_000);
+
+    registry.register(&s.ngo, &soroban_sdk::String::from_str(&s.env, "Red Cross"));
+    registry.approve_ngo(&s.ngo);
+
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+
+    registry.revoke_ngo(&s.ngo);
+    s.env.ledger().with_mut(|l| l.timestamp += 10); // 100 accrues at the old rate
+
+    s.client.modify_rate(&stream_id, &5);
+
+    let stream = s.client.get_stream(&stream_id);
+    assert_eq!(stream.rate, 5);
+    assert_eq!(stream.balance, 900);
+    assert_eq!(s.token.balance(&s.ngo), 100);
+}
+
+#[test]
+fn modify_rate_increase_for_verified_ngo_succeeds() {
+    let (s, registry) = setup_with_registry();
+    s.token_admin.mint(&s.donor, &1_000);
+
+    registry.register(&s.ngo, &soroban_sdk::String::from_str(&s.env, "Red Cross"));
+    registry.approve_ngo(&s.ngo);
+
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+
+    s.client.modify_rate(&stream_id, &20);
+    assert_eq!(s.client.get_stream(&stream_id).rate, 20);
+}
+
+// =============================================================================
+// create_stream rejects the vault's own address (issue #331)
+// =============================================================================
+
+#[test]
+fn create_stream_rejects_vault_as_ngo() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+
+    let vault = s.client.address.clone();
+    let result = s
+        .client
+        .try_create_stream(&s.donor, &vault, &s.token.address, &1_000, &10);
+    assert_eq!(result, Err(Ok(Error::InvalidNgo)));
+
+    // Nothing written, nothing moved.
+    assert_eq!(s.client.stream_count(), 0);
+    assert_eq!(s.client.total_donated(), 0);
+    assert_eq!(s.token.balance(&s.donor), 1_000);
+    assert_eq!(s.token.balance(&vault), 0);
+}
+
+#[test]
+fn create_stream_rejects_vault_as_token() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+
+    let vault = s.client.address.clone();
+    let result = s
+        .client
+        .try_create_stream(&s.donor, &s.ngo, &vault, &1_000, &10);
+    assert_eq!(result, Err(Ok(Error::InvalidToken)));
+
+    // Nothing written, nothing moved.
+    assert_eq!(s.client.stream_count(), 0);
+    assert_eq!(s.client.total_donated(), 0);
+    assert_eq!(s.client.streams_by_donor(&s.donor).len(), 0);
+    assert_eq!(s.token.balance(&s.donor), 1_000);
+}
+
+// =============================================================================
+// withdraw fee derivation (issue #332)
+// =============================================================================
+
+#[test]
+fn fee_from_payout_returns_accrued_minus_net() {
+    assert_eq!(fee_from_payout(1_000, 950), Ok(50));
+    assert_eq!(fee_from_payout(1_000, 1_000), Ok(0));
+}
+
+#[test]
+fn fee_from_payout_reports_overflow_instead_of_zero() {
+    // A broken invariant that makes `accrued - net` leave i128's range must
+    // surface as an error, not as a silent fee of zero.
+    assert_eq!(
+        fee_from_payout(i128::MIN, 1),
+        Err(Error::ArithmeticOverflow)
+    );
+    assert_eq!(
+        fee_from_payout(i128::MAX, -1),
+        Err(Error::ArithmeticOverflow)
+    );
+}
+
+#[test]
+fn withdraw_event_fee_matches_fee_helper() {
+    let s = setup();
+    let treasury = Address::generate(&s.env);
+    s.client.set_treasury(&treasury);
+    s.client.set_fee_bps(&500); // 5%
+    s.token_admin.mint(&s.donor, &1_000);
+
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    s.env.ledger().with_mut(|l| l.timestamp += 50); // 500 accrues
+
+    let net = s.client.withdraw(&stream_id);
+    let fee = fee_from_payout(500, net).unwrap();
+    assert_last_event(
+        &s.env,
+        (symbol_short!("withdraw"), stream_id),
+        (500i128, fee, net),
+    );
+    assert_eq!(fee, 25);
+    assert_eq!(net, 475);
+    assert_eq!(s.token.balance(&treasury), 25);
+}
+
+// =============================================================================
 // withdraw_batch tests (issue #285)
 // =============================================================================
 
