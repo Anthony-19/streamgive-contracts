@@ -225,7 +225,8 @@ the numeric code below (e.g. a failed `try_withdraw` surfacing `Error(5)`).
 
 ### `donation-vault`
 
-Codes 1–23 are the full `Error` enum. "Admin-gated" entry points first call
+Codes 1–27 are the full `Error` enum. Codes are append-only and never
+renumbered; see [docs/UPGRADE_POLICY.md](docs/UPGRADE_POLICY.md). "Admin-gated" entry points first call
 `require_admin`, so they can also return `NotInitialized` (no admin) or
 `AdminRenounced`.
 
@@ -248,16 +249,20 @@ Codes 1–23 are the full `Error` enum. "Admin-gated" entry points first call
 | 15 | `StreamCancelled` | The stream was already closed out by `cancel_stream`/`rescue_stream`. | `top_up`, `modify_rate`, `transfer_stream`, `rescue_stream` |
 | 16 | `InvalidAdmin` | The proposed admin equals the current admin. | `propose_admin` |
 | 17 | `StreamLimitExceeded` | Donor reached `max_streams_per_donor`. | `create_stream` |
-| 18 | `NgoNotVerified` | A configured registry has no verified entry for the NGO. | `create_stream` |
+| 18 | `NgoNotVerified` | A configured registry has no verified entry for the NGO. | `create_stream`, `top_up`, `transfer_stream`, `modify_rate` (rate increases only) |
 | 19 | `StreamCounterMissing` | The stream-id counter is absent from instance storage. | `create_stream` |
 | 20 | `AdminRenounced` | Admin control was permanently renounced, or `init` ran after a renounce. | `init`, `admin`, `propose_admin`, `cancel_admin_proposal`, `pause`, `unpause`, `set_treasury`, `clear_treasury`, `set_fee_bps`, `set_token_fee_bps`, `clear_token_fee_bps`, `set_min_deposit`, `set_cancel_grace_ledgers`, `set_max_streams_per_donor`, `set_registry`, `renounce_admin`, `rescue_stream`, `upgrade` |
 | 21 | `FeeRequiresTreasury` | A non-zero fee was set with no treasury, or the treasury was cleared while a fee is set. | `set_fee_bps`, `set_token_fee_bps`, `clear_treasury` |
 | 22 | `NotPaused` | `rescue_stream` called while the vault is active. | `rescue_stream` |
 | 23 | `MixedNgo` | A batch withdrawal mixed streams belonging to different NGOs. | `withdraw_batch` |
+| 24 | `BatchLimitExceeded` | Too many ids in one batch call. | `get_streams`, `withdraw_batch` |
+| 25 | `DuplicateStreamId` | The same stream id appears twice in a batch withdrawal. | `withdraw_batch` |
+| 26 | `InvalidNgo` | The NGO is the vault's own address. | `create_stream` |
+| 27 | `InvalidToken` | The token is the vault's own address. | `create_stream` |
 
 ### `ngo-registry`
 
-Codes 1–11 are the full `Error` enum. Admin-gated entry points first call
+Codes 1–11 are the full `Error` enum. The same append-only rule applies. Admin-gated entry points first call
 `require_admin`, so they can also return `NotInitialized`.
 
 | Code | Error | Meaning | Entry points |
